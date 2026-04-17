@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Output
+output/
+*.npy
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# SigMF captures (large raw data files)
+*.sigmf-data
+*.sigmf-meta
+
+# Sample data npy files (large)
+sample_data/*.npy
+
+nohup.out

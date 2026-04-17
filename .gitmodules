@@ -1,0 +1,3 @@
+[submodule "doppler-predictor"]
+	path = doppler-predictor
+	url = https://github.com/jessest94106/doppler-predictor

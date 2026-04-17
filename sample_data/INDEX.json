@@ -1,0 +1,37 @@
+{
+  "files": [
+    {
+      "name": "easy_5sats_lownoise.npy",
+      "shape": [
+        256,
+        512
+      ],
+      "description": "5 satellites, low noise (sigma=2), mild leakage \u2014 good for testing detection sensitivity"
+    },
+    {
+      "name": "medium_10sats.npy",
+      "shape": [
+        256,
+        512
+      ],
+      "description": "10 satellites, default settings \u2014 standard demo file"
+    },
+    {
+      "name": "hard_15sats_noisy.npy",
+      "shape": [
+        256,
+        512
+      ],
+      "description": "15 satellites, heavy noise (sigma=5), strong leakage \u2014 stress test"
+    },
+    {
+      "name": "medium_10sats_cleaned.npy",
+      "shape": [
+        256,
+        512
+      ],
+      "description": "Pre-cleaned version of medium_10sats (leakage already removed)"
+    }
+  ],
+  "note": "All files are 2D numpy arrays, shape (n_freq, n_time), dtype float64, values in dB."
+}
