@@ -7,6 +7,8 @@
 
 A Streamlit app that takes a raw Starlink satellite capture, cleans it up, finds the satellite tracks, and checks them against TLE-based Doppler predictions.
 
+**Live app:** https://starlink-spectrogram-tool.streamlit.app
+
 ---
 
 ## Screenshots
