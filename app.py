@@ -564,7 +564,17 @@ elif data_source == "Load .npy spectrogram":
         _npy_label = os.path.basename(npy_local_path)
 
     elif uploaded_file is not None:
-        _npy_arr = np.load(uploaded_file, allow_pickle=True)
+        try:
+            import io
+            _npy_arr = np.load(io.BytesIO(uploaded_file.read()), allow_pickle=True)
+        except Exception as _e:
+            st.error(
+                f"**Could not read `{uploaded_file.name}`** — {_e}\n\n"
+                "Make sure the file is a valid NumPy `.npy` array saved with "
+                "`np.save()`. If the file is larger than 200 MB, use the "
+                "**Paste file path** option instead."
+            )
+            st.stop()
         _npy_label = uploaded_file.name
 
     # Validate shape
