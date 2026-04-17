@@ -17,6 +17,9 @@ A Streamlit app that takes a raw Starlink satellite capture, cleans it up, finds
 **Detected Tracks**
 ![Detected Tracks](screenshots/detected_tracks.png)
 
+**Predicted Doppler (TLE-based, Skyfield)**
+![Predicted Doppler](screenshots/Predicted-doppler.png)
+
 **Measured vs Predicted**
 ![Measured vs Predicted](screenshots/measured_vs_predicted.png)
 
