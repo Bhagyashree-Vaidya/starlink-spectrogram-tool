@@ -11,14 +11,17 @@ A Streamlit app that takes a raw Starlink satellite capture, cleans it up, finds
 
 ## Screenshots
 
+**Before / After leakage removal**
+![Before and After](screenshots/before_after.png)
+
 **Detected Tracks**
 ![Detected Tracks](screenshots/detected_tracks.png)
 
-**Predicted Doppler (TLE-based, Skyfield)**
-![Predicted Doppler S-curves](screenshots/predicted_doppler.png)
-
 **Measured vs Predicted**
 ![Measured vs Predicted](screenshots/measured_vs_predicted.png)
+
+**Colour scale reference**
+![Colour scale](screenshots/colorscale.png)
 
 ---
 
