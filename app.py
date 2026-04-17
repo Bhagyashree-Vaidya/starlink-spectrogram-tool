@@ -63,8 +63,12 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
-    /* tighter spacing */
-    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+    /* hide Streamlit top toolbar (Deploy button, hamburger) */
+    header[data-testid="stHeader"] { display: none; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    /* pull content up so title isn't buried */
+    .block-container { padding-top: 0.5rem; padding-bottom: 1rem; }
     /* metric cards */
     div[data-testid="stMetric"] {
         background: #0e1117; border: 1px solid #262730;
