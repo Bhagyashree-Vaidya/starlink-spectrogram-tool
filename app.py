@@ -218,14 +218,15 @@ with st.sidebar:
         )
 
         if prediction_mode == "Real TLE (Skyfield)":
-            default_tle = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "doppler-predictor", "starlink.txt",
-            )
+            _base = os.path.dirname(os.path.abspath(__file__))
+            # prefer root-level copy (works on Streamlit Cloud); fall back to submodule
+            default_tle = os.path.join(_base, "starlink.txt")
+            if not os.path.exists(default_tle):
+                default_tle = os.path.join(_base, "doppler-predictor", "starlink.txt")
             tle_file_path = st.text_input(
                 "TLE file path",
                 value=default_tle if os.path.exists(default_tle) else "",
-                help="3-line TLE file. The repo ships `doppler-predictor/starlink.txt` (~9000 sats).",
+                help="3-line TLE file. The repo ships `starlink.txt` (~9000 sats).",
             )
             capture_datetime_str = st.text_input(
                 "Capture time (UTC)",
