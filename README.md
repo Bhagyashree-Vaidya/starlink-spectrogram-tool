@@ -4,10 +4,9 @@
 **Lab:** Prof. Sumit Roy, FunLab
 **Doppler predictor:** adapted from Jesse Chiu's [doppler-predictor](https://github.com/jessest94106/doppler-predictor)
 **Status:** Prototype v2 (April 2026)
+**Live app:** https://starlink-spectrogram-tool.streamlit.app
 
 A Streamlit app that takes a raw Starlink satellite capture, cleans it up, finds the satellite tracks, and checks them against TLE-based Doppler predictions.
-
-**Live app:** https://starlink-spectrogram-tool.streamlit.app
 
 ---
 
