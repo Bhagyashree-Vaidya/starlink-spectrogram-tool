@@ -56,6 +56,7 @@ from scurve_extractor import (
 )
 from matched_filter import recover_faint_predictions
 from residual_analysis import compute_residuals, diagnose, aggregate_summary
+from batch_processor import process_folder
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -108,6 +109,7 @@ with st.sidebar:
             "Synthetic + Predicted overlay",
             "Load .npy spectrogram",
             "Load SigMF capture (.sigmf-meta)",
+            "Batch process folder",
         ],
         index=1,
         help=(
@@ -167,6 +169,19 @@ with st.sidebar:
             "paste the path to any `.sigmf-meta` file.  \n"
             "Example: `~/Downloads/starlink_sigmf_20251120_175016/"
             "r001_f11.200GHz_20251121T015107.sigmf-meta`"
+        )
+
+    batch_folder_path = None
+    if data_source == "Batch process folder":
+        batch_folder_path = st.text_input(
+            "Folder path",
+            value="",
+            help="Absolute path to a folder containing .npy and/or .sigmf-meta files. "
+                 "All captures found recursively will be processed.",
+        )
+        st.caption(
+            "Processes every `.npy` and `.sigmf-meta` file in the folder. "
+            "Results shown as a summary table with CSV export."
         )
 
     # --- Synthetic generation params ----------------------------------
@@ -553,6 +568,130 @@ def _map_predictions_to_spectrogram(predictions, n_freq, n_time):
 
 st.markdown("## 📡 Starlink Spectrogram Processing Tool")
 st.caption("Prototype v2  |  Doppler prediction + correlation pipeline")
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  BATCH MODE                                                            ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+if data_source == "Batch process folder":
+    if not batch_folder_path:
+        st.info("Paste a folder path in the sidebar to start batch processing.")
+        st.stop()
+    if not os.path.isdir(batch_folder_path):
+        st.error(f"Folder not found: `{batch_folder_path}`")
+        st.stop()
+
+    # build predictions if TLE is enabled
+    batch_preds = None
+    if enable_prediction and prediction_mode == "Real TLE (Skyfield)":
+        if tle_file_path and os.path.exists(tle_file_path) and capture_datetime_str:
+            with st.spinner("Scanning TLEs for batch predictions..."):
+                raw_preds, _, n_total, n_vis, _ = _run_tle_prediction(
+                    tle_file_path, capture_datetime_str,
+                    obs_lat, obs_lon, obs_alt,
+                    pass_duration_min, pass_step_s, max_visible_sats,
+                )
+            st.success(f"Scanned {n_total} TLEs, {n_vis} visible, {len(raw_preds)} usable passes.")
+            # map to a reference spectrogram shape (512x256 default)
+            batch_preds = _map_predictions_to_spectrogram(raw_preds, 256, 512)
+    elif enable_prediction and prediction_mode == "Synthetic (demo)":
+        batch_preds = generate_synthetic_prediction(n_time=512, n_freq=256, n_tracks=10, seed=42)
+
+    batch_params = {
+        "removal_method": removal_method,
+        "min_track_length": min_track_length,
+        "merge_tol_px": merge_tol_px,
+        "min_r2": min_r2,
+        "min_ridge_pts": min_ridge_pts,
+        "max_match_dist": max_match_dist,
+        "faint_k_sigma": faint_sensitivity,
+    }
+
+    progress_bar = st.progress(0, text="Starting batch...")
+    def _progress(i, n, fname):
+        progress_bar.progress((i + 1) / n, text=f"Processing {fname}  ({i+1}/{n})")
+
+    with st.spinner("Running batch pipeline..."):
+        summary_rows, batch_results = process_folder(
+            batch_folder_path, predictions=batch_preds,
+            params=batch_params, progress_callback=_progress,
+        )
+    progress_bar.empty()
+
+    if not summary_rows:
+        st.warning(f"No .npy or .sigmf-meta files found in `{batch_folder_path}`")
+        st.stop()
+
+    # Summary
+    n_files = len(summary_rows)
+    n_ok = sum(1 for r in batch_results if r["status"] == "ok")
+    n_err = n_files - n_ok
+    total_matched = sum(r["n_matched"] for r in batch_results)
+    total_faint = sum(r["n_faint_recovered"] for r in batch_results)
+    total_time = sum(r["processing_time_s"] for r in batch_results)
+
+    bc1, bc2, bc3, bc4, bc5 = st.columns(5)
+    bc1.metric("Files processed", n_files)
+    bc2.metric("Succeeded", n_ok, delta=f"{n_err} failed" if n_err else None,
+               delta_color="inverse" if n_err else "off")
+    bc3.metric("Total matched", total_matched)
+    bc4.metric("Faint recovered", total_faint)
+    bc5.metric("Total time", f"{total_time:.1f}s")
+
+    # Results table
+    st.markdown("### Batch results")
+    st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+
+    # Per-file match details
+    all_match_rows = []
+    for r in batch_results:
+        for m in r.get("matches", []):
+            all_match_rows.append({
+                "File": r["file"],
+                "Detection": f"T{m['detected_id']}",
+                "Prediction": m["prediction_label"],
+                "Distance (px)": f"{m['distance_px']:.2f}",
+                "Confidence": f"{m['confidence']*100:.0f}%",
+            })
+    if all_match_rows:
+        with st.expander(f"All matches across files ({len(all_match_rows)} total)"):
+            st.dataframe(all_match_rows, use_container_width=True, hide_index=True)
+
+    # Errors
+    errors = [r for r in batch_results if r["status"] == "error"]
+    if errors:
+        with st.expander(f"Errors ({len(errors)} files)"):
+            for r in errors:
+                st.error(f"**{r['file']}**: {r['error']}")
+
+    # CSV export
+    import csv, io
+    csv_buf = io.StringIO()
+    if summary_rows:
+        writer = csv.DictWriter(csv_buf, fieldnames=summary_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    st.download_button(
+        "Download batch summary (CSV)",
+        data=csv_buf.getvalue(),
+        file_name="batch_summary.csv",
+        mime="text/csv",
+    )
+
+    # JSON export
+    export_data = []
+    for r in batch_results:
+        d = {k: v for k, v in r.items() if k != "residuals"}
+        d["matches"] = r.get("matches", [])
+        export_data.append(d)
+    st.download_button(
+        "Download full report (JSON)",
+        data=json.dumps(export_data, indent=2, default=str),
+        file_name="batch_report.json",
+        mime="application/json",
+    )
+
+    st.stop()  # batch mode renders its own UI — skip single-capture pipeline
 
 # --- Load / generate data -----------------------------------------------
 spectrogram = None
