@@ -54,6 +54,7 @@ from scurve_extractor import (
     fit_to_curve,
     scurve_model,
 )
+from matched_filter import recover_faint_predictions
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -290,6 +291,20 @@ with st.sidebar:
         disabled=not use_scurve,
         help="Two detection fragments are merged into one trajectory when "
              "their fitted curves agree to within this many pixels.",
+    )
+    recover_faint = st.checkbox(
+        "Recover faint missed passes", value=True,
+        disabled=not enable_prediction,
+        help="After matching, walk along each unmatched TLE prediction and "
+             "check for faint energy below the detection threshold. Only looks "
+             "where a real orbit predicts a track, so it adds recall without "
+             "inventing tracks.",
+    )
+    faint_sensitivity = st.slider(
+        "Faint recovery sensitivity (k·σ)", 1.0, 3.0, 1.5, step=0.5,
+        disabled=not (enable_prediction and recover_faint),
+        help="Lower = more sensitive (recovers fainter passes). The bar a "
+             "curve's energy must clear above the noise floor.",
     )
 
     # --- Leakage removal params ---------------------------------------
@@ -748,6 +763,22 @@ if enable_prediction and predictions:
             n_predicted=len(predictions), n_detected=n_det_for_summary,
         )
 
+# --- Phase 3: prediction-guided faint recovery -------------------------
+# Walk each unmatched prediction and check for faint energy along its curve.
+# Precise by construction (only looks where an orbit predicts a track), so it
+# can only add recall, never steal an existing match.
+faint_recovered = []
+if (enable_prediction and recover_faint and predictions and corr_summary
+        and unmatched_pred):
+    label_to_pred = {p["label"]: p for p in predictions}
+    unmatched_pred_dicts = [label_to_pred[l] for l in unmatched_pred
+                            if l in label_to_pred]
+    with st.spinner("Checking unmatched predictions for faint passes…"):
+        faint_recovered = recover_faint_predictions(
+            enhanced, unmatched_pred_dicts, leakage_mask=leakage_mask,
+            k_sigma=faint_sensitivity,
+        )
+
 # ── Metric bar ──────────────────────────────────────────────────────────
 n_detected = len(track_props)
 n_truth = metadata["n_satellites"] if metadata else "—"
@@ -766,8 +797,16 @@ if corr_summary:
                   delta_color="off")
     else:
         m2.metric("Detected", n_detected)
-    m3.metric("Matched", corr_summary["n_matched"])
-    m4.metric("Recall", f"{corr_summary['recall']*100:.0f}%")
+    n_faint = len(faint_recovered)
+    m3.metric("Matched", corr_summary["n_matched"],
+              delta=f"+{n_faint} faint" if n_faint else None,
+              delta_color="normal")
+    # recall including faint recoveries (matched + faint, over predicted)
+    eff_recall = ((corr_summary["n_matched"] + n_faint)
+                  / corr_summary["n_predicted"]) if corr_summary["n_predicted"] else 0.0
+    m4.metric("Recall", f"{corr_summary['recall']*100:.0f}%",
+              delta=f"{eff_recall*100:.0f}% with faint" if n_faint else None,
+              delta_color="normal")
     m5.metric("Precision", f"{corr_summary['precision']*100:.0f}%")
     m6.metric("Avg distance", f"{corr_summary['avg_distance_px']:.1f} px")
 else:
@@ -1219,19 +1258,29 @@ if tab_correlate is not None:
             pred_to_color = {p["label"]: palette[i % len(palette)]
                              for i, p in enumerate(predictions)}
 
+            # Build set of faint-recovered labels for legend styling
+            faint_labels = {r["prediction_label"] for r in faint_recovered}
+
             # Predicted curves (lines)
             for pred in predictions:
                 matched = pred["label"] in {m["prediction_label"] for m in matches}
+                is_faint = pred["label"] in faint_labels
+                if matched:
+                    dash, opacity, marker = "solid", 0.9, "✓"
+                elif is_faint:
+                    dash, opacity, marker = "dashdot", 0.75, "〜"
+                else:
+                    dash, opacity, marker = "dot", 0.35, "✗"
                 fig_corr.add_trace(go.Scatter(
                     x=pred["time_bins"], y=pred["freq_bins"],
                     mode="lines",
                     line=dict(
                         color=pred_to_color[pred["label"]],
                         width=2.5,
-                        dash="solid" if matched else "dot",
+                        dash=dash,
                     ),
-                    name=f"{'✓' if matched else '✗'} {pred['label']}",
-                    opacity=0.9 if matched else 0.4,
+                    name=f"{marker} {pred['label']}",
+                    opacity=opacity,
                 ))
 
             if use_scurve and scurve_curves:
@@ -1290,28 +1339,60 @@ if tab_correlate is not None:
                     "Distance (px)": f"{m['distance_px']:.2f}",
                     "Time overlap": m["n_overlap_pts"],
                     "Confidence": f"{m['confidence']*100:.1f}%",
+                    "Source": "detected",
                 } for m in matches]
-                st.dataframe(match_rows, width="stretch")
+                st.dataframe(match_rows, use_container_width=True, hide_index=True)
             else:
                 st.warning("No matches found at the current distance threshold.")
 
+            # Faint recovery results
+            if faint_recovered:
+                st.markdown("#### Faint recovered passes (below detection threshold)")
+                st.caption(
+                    "These predictions were not detected by the blob detector but "
+                    "show faint energy along the predicted curve. "
+                    "Dash-dot lines on the plot above. "
+                    f"Legend marker: 〜"
+                )
+                faint_rows = [{
+                    "Predicted satellite": r["prediction_label"],
+                    "Coverage": f"{r['coverage']*100:.0f}%",
+                    "Contiguous arc": f"{r['contiguous']*100:.0f}%",
+                    "Confidence": f"{r['confidence']*100:.0f}%",
+                    "Mean excess power": f"{r['mean_excess']:.4f}",
+                } for r in faint_recovered]
+                st.dataframe(faint_rows, use_container_width=True, hide_index=True)
+
             cm1, cm2 = st.columns(2)
             with cm1:
-                if unmatched_pred:
-                    st.error(f"**Missed predictions** ({len(unmatched_pred)}):  "
-                             + ", ".join(unmatched_pred))
+                # only show truly missed: exclude faint-recovered ones
+                truly_missed = [l for l in unmatched_pred
+                                if l not in faint_labels]
+                if truly_missed:
+                    st.error(f"**Missed predictions** ({len(truly_missed)}):  "
+                             + ", ".join(truly_missed))
+                elif unmatched_pred:
+                    st.success(
+                        f"All {len(unmatched_pred)} unmatched predictions "
+                        f"recovered as faint passes."
+                    )
             with cm2:
                 if unmatched_det:
                     st.warning(f"**Unmatched detections (false alarms)** "
                                f"({len(unmatched_det)}):  "
                                + ", ".join(str(d) for d in unmatched_det))
 
-            # Export
+            # Export — include faint recoveries in the JSON
             st.download_button(
                 "⬇ Download correlation report (JSON)",
                 data=json.dumps({
                     "summary": corr_summary,
                     "matches": matches,
+                    "faint_recovered": [
+                        {k: v for k, v in r.items()
+                         if k not in ("time_bins", "freq_bins")}
+                        for r in faint_recovered
+                    ],
                     "unmatched_predictions": unmatched_pred,
                     "unmatched_detections": unmatched_det,
                 }, indent=2),
