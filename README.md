@@ -75,6 +75,27 @@ For SigMF files, the app memory-maps the IQ data, runs an STFT (NFFT=1024, nover
 4. Removes short connected components.
 5. Labels each remaining blob and extracts shape stats.
 
+**Stage 3b: S-curve trajectory fitting (optional, on by default)**
+
+Connected-component detection returns noisy pixel blobs, and a single
+satellite pass often breaks into several fragments. This stage fits a
+parametric Doppler S-curve to each blob and merges the fragments that lie on
+the same trajectory:
+
+```
+f(t) = f0 + (Δf / 2) * tanh((t - t0) / τ)
+```
+
+- `f0`  centre frequency (closest-approach frequency)
+- `Δf`  total frequency swing across the pass
+- `t0`  time of closest approach (the inflection point)
+- `τ`   time constant (how sharp the S is)
+
+Each detection becomes a clean analytic curve with a goodness-of-fit (RMSE,
+R²) instead of a pixel blob. Fragments whose fitted curves agree to within a
+few pixels are merged into one trajectory, which removes the
+"multiple detections on the same trajectory" problem.
+
 **Stage 4: Correlation**
 
 The Doppler prediction logic is adapted from Jesse Chiu's `doppler-predictor`. It uses Skyfield's SGP4 propagator to compute the range rate for each TLE and convert it to a Doppler shift:
@@ -84,11 +105,18 @@ f_doppler = -f_tx * v_radial / c
 v_radial = d(slant_range) / dt  (finite difference, 1 s step)
 ```
 
-The correlation module then:
+The correlation module then matches detections to predictions. Two matchers
+are available:
 
-1. Computes the mean per-pixel distance between each detected track and each predicted curve.
-2. Greedy 1-to-1 assigns detections to predictions (closest first, within a configurable distance cutoff).
-3. Reports recall, precision, average distance, and per-match confidence.
+1. **Hungarian (optimal)** — runs on the fitted S-curves and minimises the
+   total assignment cost (`scipy.optimize.linear_sum_assignment`), so a
+   locally-closest pairing can't starve a globally better one. This is the
+   default.
+2. **Greedy** — the original pixel-distance matcher (closest pair first),
+   used when S-curve fitting is turned off.
+
+Either way it reports recall, precision, average distance, and per-match
+confidence. Pairs beyond a configurable distance cutoff are rejected.
 
 A synthetic prediction generator is also included for demos that do not need a live Skyfield scan.
 
@@ -101,13 +129,14 @@ A synthetic prediction generator is also included for demos that do not need a l
 - Data source picker
 - Synthetic data settings (array shape, leakage, noise, seed)
 - Doppler prediction settings (miss rate, false alarms, max match distance)
+- Trajectory fitting (S-curve fit + optimal matching toggle, fragment merge tolerance)
 - Leakage removal settings (percentile, dilation, fill method)
 - Track detection settings (threshold, minimum length, background filter)
 
 **Metric bar (when correlation is on)**
 
 ```
-Predicted | Detected | Matched | Recall | Precision | Avg distance
+Predicted | Trajectories | Matched | Recall | Precision | Avg distance
 ```
 
 **Tabs**
@@ -117,8 +146,9 @@ Predicted | Detected | Matched | Recall | Precision | Avg distance
 | Before / After | Raw vs cleaned spectrogram, leakage bins marked in red |
 | Detected Tracks | Cleaned spectrogram with each track labelled |
 | Enhancement Detail | Background-subtracted image and mean power plot |
+| S-curve Fits | Fitted Doppler S-curves per trajectory, fit parameters and R², fragment-merge summary |
 | Predicted Doppler | Predicted S-curves and radial velocity over time |
-| Measured vs Predicted | Correlation overlay, match table, JSON export |
+| Measured vs Predicted | Correlation overlay (fitted curves coloured by match), match table, JSON export |
 | Track Data | Shape stats for every detected track, JSON and .npy export |
 
 ---
@@ -130,9 +160,10 @@ Streamlit Interactive UI/
 ├── app.py                    # Streamlit app
 ├── files/
 │   ├── starlink_pipeline.py  # Leakage removal and track detection
+│   ├── scurve_extractor.py   # S-curve fitting + fragment merging (Phase 1)
 │   ├── doppler_predictor.py  # Doppler prediction (adapted from Jesse's repo)
 │   ├── capture_loader.py     # SigMF and .npy loaders
-│   └── correlation.py        # Track-to-prediction matcher
+│   └── correlation.py        # Greedy + Hungarian matchers (Phase 2)
 ├── doppler-predictor/        # Jesse's repo, added as a git submodule
 ├── screenshots/
 ├── sample_data/

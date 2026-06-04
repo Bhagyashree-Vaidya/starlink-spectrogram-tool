@@ -335,6 +335,7 @@ def detect_tracks(spectrogram, min_track_length=20, power_threshold=None):
 
         track_info = {
             'track_id': region.label,
+            '_label': int(region.label),   # original label in track_labels image
             'centroid_freq': float(region.centroid[0]),
             'centroid_time': float(region.centroid[1]),
             'bbox': {

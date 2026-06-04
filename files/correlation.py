@@ -14,6 +14,7 @@ detections by which TLE they most likely belong to.
 
 import numpy as np
 from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +124,90 @@ def match_tracks_to_predictions(track_label_image, track_props, predictions,
                       if p["label"] not in matched_pred]
 
     return matches, unmatched_det, unmatched_pred
+
+
+# ---------------------------------------------------------------------------
+# Curve-to-curve distance (fitted S-curve  ↔ predicted curve)
+# ---------------------------------------------------------------------------
+def curve_to_curve_distance(curve_a, curve_b, min_overlap=3):
+    """
+    Mean |Δfreq| between two curves over the integer time bins they share.
+
+    Each curve is a dict with `time_bins` and `freq_bins`. Returns
+    (mean_distance, n_overlap). Distance is +inf when the time overlap is
+    below `min_overlap` (curves that barely share time can't be compared).
+    """
+    ta = np.round(curve_a["time_bins"]).astype(int)
+    tb = np.round(curve_b["time_bins"]).astype(int)
+    la = dict(zip(ta, curve_a["freq_bins"]))
+    lb = dict(zip(tb, curve_b["freq_bins"]))
+    shared = set(la) & set(lb)
+    if len(shared) < min_overlap:
+        return float("inf"), len(shared)
+    diffs = [abs(la[t] - lb[t]) for t in shared]
+    return float(np.mean(diffs)), len(shared)
+
+
+# ---------------------------------------------------------------------------
+# Hungarian (optimal) matcher  —  Phase 2
+# ---------------------------------------------------------------------------
+def match_curves_hungarian(curves, predictions, max_distance_px=12.0,
+                           min_overlap=3):
+    """
+    Optimal one-to-one assignment between fitted S-curves and predicted curves
+    using the Hungarian algorithm (scipy `linear_sum_assignment`).
+
+    Unlike the greedy matcher this minimises the *total* assignment cost, so a
+    locally-closest pairing can't starve a globally better one. Pairs whose
+    distance exceeds `max_distance_px` are rejected after assignment.
+
+    `curves` and `predictions` are both lists of dicts with `time_bins`,
+    `freq_bins`, and a label (`track_id` for curves, `label` for predictions).
+
+    Returns (matches, unmatched_curve_ids, unmatched_pred_labels).
+    """
+    n_c = len(curves)
+    n_p = len(predictions)
+    matches = []
+    if n_c == 0 or n_p == 0:
+        return ([],
+                [c.get("track_id", i) for i, c in enumerate(curves)],
+                [p["label"] for p in predictions])
+
+    BIG = 1e6
+    cost = np.full((n_c, n_p), BIG, dtype=float)
+    overlap = np.zeros((n_c, n_p), dtype=int)
+    for i, c in enumerate(curves):
+        for j, p in enumerate(predictions):
+            d, n_ov = curve_to_curve_distance(c, p, min_overlap=min_overlap)
+            overlap[i, j] = n_ov
+            if np.isfinite(d):
+                cost[i, j] = d
+
+    row_idx, col_idx = linear_sum_assignment(cost)
+
+    matched_c, matched_p = set(), set()
+    for i, j in zip(row_idx, col_idx):
+        d = cost[i, j]
+        if d > max_distance_px:          # reject weak assignments
+            continue
+        cid = curves[i].get("track_id", i)
+        plabel = predictions[j]["label"]
+        matches.append({
+            "detected_id": int(cid),
+            "prediction_label": plabel,
+            "distance_px": float(d),
+            "n_overlap_pts": int(overlap[i, j]),
+            "confidence": float(np.exp(-d / 4.0)),
+        })
+        matched_c.add(i)
+        matched_p.add(j)
+
+    unmatched_c = [curves[i].get("track_id", i)
+                   for i in range(n_c) if i not in matched_c]
+    unmatched_p = [predictions[j]["label"]
+                   for j in range(n_p) if j not in matched_p]
+    return matches, unmatched_c, unmatched_p
 
 
 # ---------------------------------------------------------------------------

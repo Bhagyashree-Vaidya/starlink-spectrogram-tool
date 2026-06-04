@@ -44,8 +44,15 @@ from capture_loader import (
 )
 from correlation import (
     match_tracks_to_predictions,
+    match_curves_hungarian,
     correlation_summary,
     rasterize_prediction,
+)
+from scurve_extractor import (
+    fit_track_scurves,
+    merge_fragments,
+    fit_to_curve,
+    scurve_model,
 )
 
 # ---------------------------------------------------------------------------
@@ -268,6 +275,21 @@ with st.sidebar:
         "Max match distance (px)", 2.0, 30.0, 12.0, step=1.0,
         disabled=not enable_prediction,
         help="Detected tracks within this distance of a predicted curve are matched",
+    )
+
+    # --- S-curve fitting + Hungarian matching (Phase 1+2) -------------
+    st.markdown('<p class="sidebar-header">Trajectory Fitting</p>', unsafe_allow_html=True)
+    use_scurve = st.checkbox(
+        "S-curve fit + optimal matching", value=True,
+        help="Fit a parametric Doppler S-curve to each detection, merge "
+             "fragments that lie on the same trajectory, and match with the "
+             "Hungarian (optimal) algorithm instead of greedy pixel distance.",
+    )
+    merge_tol_px = st.slider(
+        "Fragment merge tolerance (px)", 1.0, 10.0, 3.0, step=0.5,
+        disabled=not use_scurve,
+        help="Two detection fragments are merged into one trajectory when "
+             "their fitted curves agree to within this many pixels.",
     )
 
     # --- Leakage removal params ---------------------------------------
@@ -688,6 +710,19 @@ with st.spinner("Detecting tracks…"):
         median_bg_size,
     )
 
+# --- S-curve trajectory fitting (Phase 1) ------------------------------
+scurve_fits = []        # merged trajectories with fitted Doppler S-curves
+scurve_curves = []      # fit_to_curve adapters for matching
+if use_scurve and track_props:
+    with st.spinner("Fitting S-curve trajectories…"):
+        raw_fits = fit_track_scurves(track_labels, track_props,
+                                     intensity_image=enhanced)
+        scurve_fits, _merge_map = merge_fragments(
+            raw_fits, track_labels, intensity_image=enhanced,
+            tol_px=merge_tol_px,
+        )
+        scurve_curves = [fit_to_curve(f) for f in scurve_fits if f["success"]]
+
 # --- Correlate detected tracks against predicted curves ----------------
 matches = []
 unmatched_det = []
@@ -696,13 +731,21 @@ corr_summary = None
 
 if enable_prediction and predictions:
     with st.spinner("Correlating against predicted Doppler curves…"):
-        matches, unmatched_det, unmatched_pred = match_tracks_to_predictions(
-            track_labels, track_props, predictions,
-            max_distance_px=max_match_dist,
-        )
+        if use_scurve and scurve_curves:
+            # Phase 2: optimal assignment between fitted curves and predictions
+            matches, unmatched_det, unmatched_pred = match_curves_hungarian(
+                scurve_curves, predictions, max_distance_px=max_match_dist,
+            )
+            n_det_for_summary = len(scurve_curves)
+        else:
+            matches, unmatched_det, unmatched_pred = match_tracks_to_predictions(
+                track_labels, track_props, predictions,
+                max_distance_px=max_match_dist,
+            )
+            n_det_for_summary = len(track_props)
         corr_summary = correlation_summary(
             matches, unmatched_det, unmatched_pred,
-            n_predicted=len(predictions), n_detected=len(track_props),
+            n_predicted=len(predictions), n_detected=n_det_for_summary,
         )
 
 # ── Metric bar ──────────────────────────────────────────────────────────
@@ -715,7 +758,14 @@ snr_after = float(cleaned.max() - np.median(cleaned))
 if corr_summary:
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Predicted", corr_summary["n_predicted"])
-    m2.metric("Detected", n_detected)
+    if use_scurve and scurve_curves:
+        # trajectories after fragment merge (precision denominator)
+        delta = len(scurve_curves) - n_detected
+        m2.metric("Trajectories", corr_summary["n_detected"],
+                  delta=f"{delta} vs {n_detected} blobs" if delta else None,
+                  delta_color="off")
+    else:
+        m2.metric("Detected", n_detected)
     m3.metric("Matched", corr_summary["n_matched"])
     m4.metric("Recall", f"{corr_summary['recall']*100:.0f}%")
     m5.metric("Precision", f"{corr_summary['precision']*100:.0f}%")
@@ -732,15 +782,30 @@ else:
 # ║  VISUALIZATIONS                                                        ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
+tab_fit = None
 if enable_prediction:
-    tab_compare, tab_tracks, tab_enhanced, tab_predict, tab_correlate, tab_data = st.tabs(
-        ["Before / After", "Detected Tracks", "Enhancement Detail",
-         "Predicted Doppler", "Measured vs Predicted", "Track Data"]
-    )
+    if use_scurve:
+        (tab_compare, tab_tracks, tab_enhanced, tab_fit, tab_predict,
+         tab_correlate, tab_data) = st.tabs(
+            ["Before / After", "Detected Tracks", "Enhancement Detail",
+             "S-curve Fits", "Predicted Doppler", "Measured vs Predicted",
+             "Track Data"]
+        )
+    else:
+        tab_compare, tab_tracks, tab_enhanced, tab_predict, tab_correlate, tab_data = st.tabs(
+            ["Before / After", "Detected Tracks", "Enhancement Detail",
+             "Predicted Doppler", "Measured vs Predicted", "Track Data"]
+        )
 else:
-    tab_compare, tab_tracks, tab_enhanced, tab_data = st.tabs(
-        ["Before / After", "Detected Tracks", "Enhancement Detail", "Track Data"]
-    )
+    if use_scurve:
+        tab_compare, tab_tracks, tab_enhanced, tab_fit, tab_data = st.tabs(
+            ["Before / After", "Detected Tracks", "Enhancement Detail",
+             "S-curve Fits", "Track Data"]
+        )
+    else:
+        tab_compare, tab_tracks, tab_enhanced, tab_data = st.tabs(
+            ["Before / After", "Detected Tracks", "Enhancement Detail", "Track Data"]
+        )
     tab_predict = None
     tab_correlate = None
 
@@ -927,6 +992,98 @@ with tab_enhanced:
                 f"Length {tp['length']:.0f}px · Power {tp['mean_power']:.3f}"
             )
 
+# ── Tab: S-curve trajectory fits (Phase 1) ───────────────────────────
+if tab_fit is not None:
+    with tab_fit:
+        st.markdown(
+            "**Parametric Doppler S-curve fits.** Each detected blob is "
+            "collapsed to a ridge and fitted to "
+            "`f(t) = f0 + (Δf/2)·tanh((t − t0)/τ)`. Fragments lying on the same "
+            "trajectory are merged into one curve."
+        )
+        if not scurve_fits:
+            st.info("No detections to fit. Loosen the detection thresholds in "
+                    "the sidebar, or enable a data source with tracks.")
+        else:
+            import plotly.express as px
+            palette = px.colors.qualitative.Set2
+
+            fig_fit = go.Figure()
+            fig_fit.add_trace(go.Heatmap(
+                z=cln_plot, colorscale="Gray", zmin=cln_vmin, zmax=cln_vmax,
+                showscale=False, name="Cleaned",
+            ))
+
+            n_ok = 0
+            for f in scurve_fits:
+                tid = f["track_id"]
+                color = palette[(tid - 1) % len(palette)]
+                # ridge points
+                fig_fit.add_trace(go.Scatter(
+                    x=f["t_ridge"], y=f["f_ridge"], mode="markers",
+                    marker=dict(size=4, color=color, opacity=0.55),
+                    name=f"T{tid} ridge", showlegend=False,
+                ))
+                if f["success"]:
+                    n_ok += 1
+                    p = f["params"]
+                    merged = f.get("merged_from", [])
+                    mtag = (f"  ⟵ merged {merged}" if len(merged) > 1 else "")
+                    fig_fit.add_trace(go.Scatter(
+                        x=f["t_fit"], y=f["f_fit"], mode="lines",
+                        line=dict(color=color, width=2.5),
+                        name=f"T{tid}: Δf={p['df']:.0f}, τ={p['tau']:.0f}, "
+                             f"R²={f['r2']:.2f}{mtag}",
+                        hovertemplate=(
+                            f"Trajectory T{tid}<br>"
+                            f"f0={p['f0']:.1f}  Δf={p['df']:.1f}<br>"
+                            f"t0={p['t0']:.0f}  τ={p['tau']:.1f}<br>"
+                            f"RMSE={f['rmse']:.2f}px  R²={f['r2']:.2f}"
+                            "<extra></extra>"
+                        ),
+                    ))
+                    # closest-approach marker (inflection at t0)
+                    fig_fit.add_trace(go.Scatter(
+                        x=[p["t0"]], y=[p["f0"]], mode="markers",
+                        marker=dict(size=9, color=color, symbol="x"),
+                        showlegend=False,
+                        hovertemplate=f"T{tid} closest approach<extra></extra>",
+                    ))
+
+            fig_fit.update_layout(
+                height=560, margin=dict(t=30, b=30),
+                xaxis_title="Time (samples)", yaxis_title="Frequency (bins)",
+                legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0.5)"),
+            )
+            st.plotly_chart(fig_fit, use_container_width=True)
+
+            # parameter table
+            rows = []
+            for f in scurve_fits:
+                p = f["params"] or {}
+                rows.append({
+                    "Trajectory": f"T{f['track_id']}",
+                    "Fit OK": "✓" if f["success"] else "✗",
+                    "f0 (bin)": round(p.get("f0", float("nan")), 1) if p else None,
+                    "Δf (bins)": round(p.get("df", float("nan")), 1) if p else None,
+                    "t0 (sample)": round(p.get("t0", float("nan")), 0) if p else None,
+                    "τ": round(p.get("tau", float("nan")), 1) if p else None,
+                    "RMSE (px)": round(f["rmse"], 2) if f["success"] else None,
+                    "R²": round(f["r2"], 2) if f["success"] else None,
+                    "Ridge pts": f.get("n_points"),
+                    "Merged from": ", ".join(str(x) for x in f.get("merged_from", []))
+                                   if len(f.get("merged_from", [])) > 1 else "—",
+                })
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+            n_blobs = len(track_props)
+            n_traj = len(scurve_fits)
+            st.caption(
+                f"{n_blobs} detected blobs → {n_traj} fitted trajectories "
+                f"({n_ok} converged). Fragment merging collapsed "
+                f"{n_blobs - n_traj} overlapping detection(s)."
+            )
+
 # ── Tab: Predicted Doppler curves (Skyfield-style overlay) ────────────
 if tab_predict is not None:
     with tab_predict:
@@ -1038,10 +1195,15 @@ if tab_correlate is not None:
         if not predictions:
             st.info("Enable predicted overlay in the sidebar to populate this tab.")
         else:
+            _mode_note = ("fitted S-curves" if (use_scurve and scurve_curves)
+                          else "detected pixels")
             st.markdown(
-                "**Correlation overlay** — detected tracks coloured by their "
-                "best-matching predicted satellite. Solid lines = predictions, "
-                "scatter = detected pixels."
+                "**Correlation overlay** — detections coloured by their "
+                f"best-matching predicted satellite. Solid lines = predictions, "
+                f"overlay = {_mode_note}."
+                + ("  Matching: **Hungarian (optimal)** on fitted trajectories."
+                   if (use_scurve and scurve_curves)
+                   else "  Matching: greedy pixel distance.")
             )
             fig_corr = go.Figure()
             fig_corr.add_trace(go.Heatmap(
@@ -1072,24 +1234,45 @@ if tab_correlate is not None:
                     opacity=0.9 if matched else 0.4,
                 ))
 
-            # Detected pixels coloured by their match
-            for tp in track_props:
-                det_id = tp["track_id"]
-                ys, xs = np.where(track_labels == det_id)
-                if det_id in det_to_pred:
-                    color = pred_to_color[det_to_pred[det_id]]
-                    label = f"D{det_id} ↔ {det_to_pred[det_id]}"
-                else:
-                    color = "white"
-                    label = f"D{det_id} (false alarm)"
-                fig_corr.add_trace(go.Scatter(
-                    x=xs, y=ys, mode="markers",
-                    marker=dict(size=4, color=color,
-                                line=dict(width=0.5, color="black"),
-                                opacity=0.8),
-                    name=label, showlegend=False,
-                    hovertemplate=f"{label}<br>t=%{{x}}, f=%{{y}}<extra></extra>",
-                ))
+            if use_scurve and scurve_curves:
+                # Overlay fitted trajectory curves coloured by their match
+                for f in scurve_fits:
+                    if not f["success"]:
+                        continue
+                    det_id = f["track_id"]
+                    if det_id in det_to_pred:
+                        color = pred_to_color[det_to_pred[det_id]]
+                        label = f"T{det_id} ↔ {det_to_pred[det_id]}"
+                        width, dash = 3.0, "solid"
+                    else:
+                        color = "white"
+                        label = f"T{det_id} (false alarm)"
+                        width, dash = 2.0, "dash"
+                    fig_corr.add_trace(go.Scatter(
+                        x=f["t_fit"], y=f["f_fit"], mode="lines",
+                        line=dict(color=color, width=width, dash=dash),
+                        name=label, showlegend=False,
+                        hovertemplate=f"{label}<br>t=%{{x}}, f=%{{y}}<extra></extra>",
+                    ))
+            else:
+                # Detected pixels coloured by their match (greedy mode)
+                for tp in track_props:
+                    det_id = tp["track_id"]
+                    ys, xs = np.where(track_labels == det_id)
+                    if det_id in det_to_pred:
+                        color = pred_to_color[det_to_pred[det_id]]
+                        label = f"D{det_id} ↔ {det_to_pred[det_id]}"
+                    else:
+                        color = "white"
+                        label = f"D{det_id} (false alarm)"
+                    fig_corr.add_trace(go.Scatter(
+                        x=xs, y=ys, mode="markers",
+                        marker=dict(size=4, color=color,
+                                    line=dict(width=0.5, color="black"),
+                                    opacity=0.8),
+                        name=label, showlegend=False,
+                        hovertemplate=f"{label}<br>t=%{{x}}, f=%{{y}}<extra></extra>",
+                    ))
 
             fig_corr.update_layout(
                 height=560, margin=dict(t=30, b=30),
