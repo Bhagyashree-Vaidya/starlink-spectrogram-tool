@@ -301,10 +301,25 @@ with st.sidebar:
              "inventing tracks.",
     )
     faint_sensitivity = st.slider(
-        "Faint recovery sensitivity (k·σ)", 1.0, 3.0, 1.5, step=0.5,
+        "Faint recovery sensitivity (k*sigma)", 1.0, 3.0, 1.5, step=0.5,
         disabled=not (enable_prediction and recover_faint),
         help="Lower = more sensitive (recovers fainter passes). The bar a "
              "curve's energy must clear above the noise floor.",
+    )
+
+    # --- Fit confidence filter (Phase 4) ---------------------------------
+    st.markdown('<p class="sidebar-header">Fit Quality Filter</p>', unsafe_allow_html=True)
+    min_r2 = st.slider(
+        "Min R² for matching", 0.0, 0.95, 0.3, step=0.05,
+        disabled=not use_scurve,
+        help="Fitted trajectories with R² below this are excluded from "
+             "matching. Prevents junk fits from stealing real predictions.",
+    )
+    min_ridge_pts = st.slider(
+        "Min ridge points", 3, 30, 8,
+        disabled=not use_scurve,
+        help="Fitted trajectories with fewer ridge points than this are "
+             "excluded from matching.",
     )
 
     # --- Leakage removal params ---------------------------------------
@@ -736,7 +751,14 @@ if use_scurve and track_props:
             raw_fits, track_labels, intensity_image=enhanced,
             tol_px=merge_tol_px,
         )
-        scurve_curves = [fit_to_curve(f) for f in scurve_fits if f["success"]]
+        # Phase 4: fit confidence filter — drop junk fits before matching
+        scurve_curves = [
+            fit_to_curve(f) for f in scurve_fits
+            if f["success"]
+            and f.get("r2", 0) >= min_r2
+            and f.get("n_points", 0) >= min_ridge_pts
+        ]
+        n_filtered = sum(1 for f in scurve_fits if f["success"]) - len(scurve_curves)
 
 # --- Correlate detected tracks against predicted curves ----------------
 matches = []
@@ -1117,10 +1139,14 @@ if tab_fit is not None:
 
             n_blobs = len(track_props)
             n_traj = len(scurve_fits)
+            _nf = n_filtered if 'n_filtered' in dir() else 0
             st.caption(
-                f"{n_blobs} detected blobs → {n_traj} fitted trajectories "
+                f"{n_blobs} detected blobs -> {n_traj} fitted trajectories "
                 f"({n_ok} converged). Fragment merging collapsed "
                 f"{n_blobs - n_traj} overlapping detection(s)."
+                + (f" Quality filter removed {_nf} low-confidence fit(s) "
+                   f"(R² < {min_r2}, ridge < {min_ridge_pts} pts)."
+                   if _nf else "")
             )
 
 # ── Tab: Predicted Doppler curves (Skyfield-style overlay) ────────────
