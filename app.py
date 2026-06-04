@@ -55,6 +55,7 @@ from scurve_extractor import (
     scurve_model,
 )
 from matched_filter import recover_faint_predictions
+from residual_analysis import compute_residuals, diagnose, aggregate_summary
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -801,6 +802,13 @@ if (enable_prediction and recover_faint and predictions and corr_summary
             k_sigma=faint_sensitivity,
         )
 
+# --- Phase 5: residual analysis ----------------------------------------
+residual_results = []
+if matches and predictions:
+    det_curves_for_resid = scurve_curves if (use_scurve and scurve_curves) else []
+    if det_curves_for_resid:
+        residual_results = compute_residuals(matches, det_curves_for_resid, predictions)
+
 # ── Metric bar ──────────────────────────────────────────────────────────
 n_detected = len(track_props)
 n_truth = metadata["n_satellites"] if metadata else "—"
@@ -844,16 +852,18 @@ else:
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 tab_fit = None
+tab_resid = None
 if enable_prediction:
     if use_scurve:
         (tab_compare, tab_tracks, tab_enhanced, tab_fit, tab_predict,
-         tab_correlate, tab_data) = st.tabs(
+         tab_correlate, tab_resid, tab_data) = st.tabs(
             ["Before / After", "Detected Tracks", "Enhancement Detail",
              "S-curve Fits", "Predicted Doppler", "Measured vs Predicted",
-             "Track Data"]
+             "Residual Analysis", "Track Data"]
         )
     else:
-        tab_compare, tab_tracks, tab_enhanced, tab_predict, tab_correlate, tab_data = st.tabs(
+        (tab_compare, tab_tracks, tab_enhanced, tab_predict,
+         tab_correlate, tab_data) = st.tabs(
             ["Before / After", "Detected Tracks", "Enhancement Detail",
              "Predicted Doppler", "Measured vs Predicted", "Track Data"]
         )
@@ -1425,6 +1435,132 @@ if tab_correlate is not None:
                 file_name="correlation_report.json",
                 mime="application/json",
             )
+
+# ── Tab: Residual Analysis (Phase 5) ──────────────────────────────────
+if tab_resid is not None:
+    with tab_resid:
+        if not residual_results:
+            st.info(
+                "No residual data available. This tab requires S-curve fitting "
+                "enabled, predictions turned on, and at least one matched pair."
+            )
+        else:
+            st.markdown(
+                "**Measured minus predicted Doppler residuals.** "
+                "Each plot shows how the detected frequency deviates from the "
+                "predicted S-curve over time. Patterns in the residual reveal "
+                "clock drift, stale TLEs, timing errors, or systematic biases."
+            )
+
+            import plotly.express as px
+            palette = px.colors.qualitative.Set1
+
+            # Fleet summary
+            agg = aggregate_summary(residual_results)
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("Matches analysed", agg["n_matches"])
+            sc2.metric("Fleet mean offset",
+                       f"{agg['fleet_mean_offset']:+.2f} bins")
+            sc3.metric("Fleet mean scatter",
+                       f"{agg['fleet_mean_scatter']:.2f} bins")
+            sc4.metric("Fleet mean drift",
+                       f"{agg['fleet_mean_drift']:+.4f} bins/sample")
+
+            if agg.get("systematic_offset"):
+                st.warning(
+                    "Systematic frequency offset detected across all matches "
+                    f"(mean {agg['fleet_mean_offset']:+.2f} bins). "
+                    "This could indicate an LO calibration error or a "
+                    "systematic TLE propagation bias."
+                )
+            if agg.get("systematic_drift"):
+                st.warning(
+                    "Systematic linear drift detected across all matches "
+                    f"(mean {agg['fleet_mean_drift']:+.4f} bins/sample). "
+                    "This could indicate a sample-rate / clock-rate error "
+                    "in the SDR."
+                )
+
+            # Combined residual plot
+            fig_resid = go.Figure()
+            for i, r in enumerate(residual_results):
+                m = r["match"]
+                color = palette[i % len(palette)]
+                label = f"T{m['detected_id']} / {m['prediction_label']}"
+                diag = diagnose(r["stats"])
+
+                fig_resid.add_trace(go.Scatter(
+                    x=r["time_bins"], y=r["residual_freq"],
+                    mode="lines+markers",
+                    marker=dict(size=3, color=color),
+                    line=dict(color=color, width=1.5),
+                    name=label,
+                    hovertemplate=(
+                        f"{label}<br>"
+                        f"t=%{{x:.0f}}<br>"
+                        f"residual=%{{y:.2f}} bins<br>"
+                        f"{diag}<extra></extra>"
+                    ),
+                ))
+
+                # linear fit overlay
+                s = r["stats"]
+                t_line = r["time_bins"]
+                f_line = s["intercept"] + s["slope"] * t_line
+                fig_resid.add_trace(go.Scatter(
+                    x=t_line, y=f_line,
+                    mode="lines",
+                    line=dict(color=color, width=1, dash="dash"),
+                    showlegend=False,
+                    hovertemplate=(
+                        f"Linear fit: slope={s['slope']:.4f}, "
+                        f"R={s['r_value']:.2f}<extra></extra>"
+                    ),
+                ))
+
+            # zero line
+            fig_resid.add_hline(y=0, line_dash="dot", line_color="gray",
+                                annotation_text="perfect match",
+                                annotation_position="top left")
+
+            fig_resid.update_layout(
+                height=450, margin=dict(t=30, b=30),
+                xaxis_title="Time (samples)",
+                yaxis_title="Residual (measured - predicted, freq bins)",
+                legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0.5)"),
+            )
+            st.plotly_chart(fig_resid, use_container_width=True)
+
+            # Per-match stats table
+            st.markdown("#### Per-match diagnostics")
+            diag_rows = []
+            for r in residual_results:
+                m = r["match"]
+                s = r["stats"]
+                diag_rows.append({
+                    "Detection": f"T{m['detected_id']}",
+                    "Prediction": m["prediction_label"],
+                    "Mean offset (bins)": f"{s['mean']:+.2f}",
+                    "Std (bins)": f"{s['std']:.2f}",
+                    "Drift (bins/sample)": f"{s['slope']:+.4f}",
+                    "Drift R": f"{abs(s['r_value']):.2f}",
+                    "Points": s["n_points"],
+                    "Diagnosis": diagnose(s),
+                })
+            st.dataframe(diag_rows, use_container_width=True, hide_index=True)
+
+            # Interpretation guide
+            with st.expander("How to read residual plots"):
+                st.markdown("""
+| Pattern | What it means |
+|---|---|
+| Flat near zero | Perfect match. TLE is fresh, receiver is healthy. |
+| Constant offset | Frequency bias. Check LO calibration or TLE epoch. |
+| Linear ramp | Clock drift. SDR sample rate may be off. |
+| Shift at zero-crossing | Timing error. Capture timestamp may be wrong by a few seconds. |
+| Growing scatter | Stale TLE. Orbit has drifted from the propagated state. |
+| Symmetric V-shape | Ionospheric refraction (frequency-dependent). |
+                """)
 
 # ── Tab 4: Track data table & export ──────────────────────────────────
 with tab_data:
