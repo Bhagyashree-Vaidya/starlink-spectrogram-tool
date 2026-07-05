@@ -1,7 +1,7 @@
 # Starlink Spectrogram Processing Tool
 
-**Built by:** Bhagyashree Vaidya (MS student, UW ECE)
-**Lab:** Prof. Sumit Roy, FunLab
+**Built by:** Bhagyashree Vaidya (MSIM Graduate, UW iSchool)
+**Lab:** Prof. Sumit Roy, UW ECE
 **Doppler predictor:** adapted from Jesse Chiu's [doppler-predictor](https://github.com/jessest94106/doppler-predictor)
 **Status:** Prototype v2 (April 2026)
 **Live app:** https://starlink-spectrogram-tool.streamlit.app
@@ -31,7 +31,7 @@ A Streamlit app that takes a raw Starlink satellite capture, cleans it up, finds
 
 ## What it does
 
-The FunLab receiver captures wide-band RF data as Starlink satellites pass overhead. The raw spectrograms have two problems: a bright signal-leakage band that drowns out everything else, and faint satellite tracks that are hard to see. There was also no easy way to check whether a detected track actually matches a predicted satellite pass.
+The receiver captures wide-band RF data as Starlink satellites pass overhead. The raw spectrograms have two problems: a bright signal-leakage band that drowns out everything else, and faint satellite tracks that are hard to see. There was also no easy way to check whether a detected track actually matches a predicted satellite pass.
 
 This tool addresses all three:
 
@@ -194,7 +194,7 @@ docker run -p 8501:8501 starlink-spectrogram
 
 **Using real captures**
 
-1. Download a `starlink_sigmf_*` folder from the FunLab Drive.
+1. Download a `starlink_sigmf_*` folder from the Drive that has raw data.
 2. Make sure the `.sigmf-meta` and `.sigmf-data` files are in the same folder.
 3. In the sidebar, choose Load SigMF capture and paste the path to the `.sigmf-meta` file.
 4. Adjust sliders as needed. Defaults match the FunLab capture scripts.
@@ -216,6 +216,6 @@ pass_data = dp.compute_pass(datetime.utcnow(), duration_s=600, step_s=1.0,
 
 ## Credits
 
-- **Doppler prediction** is adapted from [jessest94106/doppler-predictor](https://github.com/jessest94106/doppler-predictor) by Jesse Chiu (UW ECE). The TLE file `starlink.txt` is from the same repo.
+- **Doppler prediction** is adapted from [jessest94106/doppler-predictor](https://github.com/jessest94106/doppler-predictor) by Jesse Chiu (PhD, UW ECE). The TLE file `starlink.txt` is from the same repo.
 - **SigMF loading and STFT settings** follow the FunLab capture pipeline (`plot_sigmf3.py`, `correlation_preprocessing.py` from the shared Drive folder).
-- **Leakage removal, track detection, correlation module, and Streamlit GUI** were built by Bhagyashree Vaidya as part of a FunLab prototype.
+- **Leakage removal, track detection, correlation module, and Streamlit GUI** were built by Bhagyashree Vaidya as part of a starlink prototype.
